@@ -66,6 +66,8 @@ enum ev_enum {
 	EV_OMIT_BOOT_DEVICE_EVENTS
 };
 
+#define MAX_HASH_COUNT 4
+
 struct spec_id_event_data {
 	char signature[16];
 	uint32_t platform_class;
@@ -87,7 +89,13 @@ union tpm_hash_digest {
 struct tpm_hash_algorithm {
 	uint16_t hashAlg;
 	union tpm_hash_digest digest;
-} __packed;
+};
+
+/* Table 96 -- TPML_DIGEST_VALUES Structure <I/O> */
+struct tpm_digest_values {
+	uint32_t count;
+	struct tpm_hash_algorithm digests[MAX_HASH_COUNT];
+};
 
 struct tcg_pcr_event2_header {
 	uint32_t pcr_index;

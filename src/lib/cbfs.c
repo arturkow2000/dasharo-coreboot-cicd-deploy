@@ -187,6 +187,7 @@ static bool cbfs_file_hash_mismatch(const void *buffer, size_t size,
 
 	if (CONFIG(TPM_MEASURED_BOOT) && !ENV_SMM) {
 		struct vb2_hash calculated_hash;
+		bool failure;
 
 		/* No need to re-hash file if we already have it from verification. */
 		if (!hash || hash->algo != tpm_log_alg()) {
@@ -197,8 +198,21 @@ static bool cbfs_file_hash_mismatch(const void *buffer, size_t size,
 				hash = &calculated_hash;
 		}
 
-		if (!hash ||
-		    tspi_cbfs_measurement(mdata->h.filename, be32toh(mdata->h.type), hash))
+		if (hash == NULL) {
+			failure = true;
+		} else {
+			// TODO: multiple hashes here  
+			struct tpm_digest digests[2];
+			digests[0].hash = hash->raw;
+			digests[0].hash_type = hash->algo;
+			digests[1].hash_type = VB2_HASH_INVALID;
+
+			failure = tspi_cbfs_measurement(mdata->h.filename,
+							be32toh(mdata->h.type),
+							digests);
+		}
+
+		if (failure)
 			ERROR("failed to measure '%s' into TPM log\n", mdata->h.filename);
 			/* We intentionally continue to boot on measurement errors. */
 	}

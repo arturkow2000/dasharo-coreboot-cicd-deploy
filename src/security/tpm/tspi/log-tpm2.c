@@ -22,6 +22,35 @@
 #include <cbmem.h>
 #include <vb2_sha.h>
 
+struct log_event {
+	uint32_t pcr;
+	uint32_t event_type;
+	uint32_t digest_count;
+	struct {
+		uint16_t hash_type;
+		uint8_t *hash;
+	} digests[ENABLED_TPM_ALGS_NUM];
+	uint32_t name_len;
+	char *name;
+};
+
+static enum vb2_hash_algorithm tpmalg_to_vb2_hash(uint16_t hash_type)
+{
+	switch (hash_type) {
+	case TPM2_ALG_SHA1:
+		return VB2_HASH_SHA1;
+	case TPM2_ALG_SHA256:
+		return VB2_HASH_SHA256;
+	case TPM2_ALG_SHA384:
+		return VB2_HASH_SHA384;
+	case TPM2_ALG_SHA512:
+		return VB2_HASH_SHA512;
+
+	default:
+		return VB2_HASH_INVALID;
+	}
+}
+
 static uint16_t tpmalg_from_vb2_hash(enum vb2_hash_algorithm hash_type)
 {
 	switch (hash_type) {
@@ -53,8 +82,7 @@ void *tpm2_log_cbmem_init(void)
 		if (tclt)
 			return tclt;
 
-		tpm_log_len = sizeof(struct tpm_2_log_table) +
-			MAX_TPM_LOG_ENTRIES * sizeof(struct tpm_2_log_entry);
+		tpm_log_len = 4 * KiB;
 		tclt = cbmem_add(CBMEM_ID_TPM2_TCG_LOG, tpm_log_len);
 		if (!tclt)
 			return NULL;
@@ -79,49 +107,99 @@ void *tpm2_log_cbmem_init(void)
 		tclt->vendor.version_major = TPM_20_LOG_VI_MAJOR;
 		tclt->vendor.version_minor = TPM_20_LOG_VI_MINOR;
 		tclt->vendor.magic = htole32(TPM_20_LOG_VI_MAGIC);
-		tclt->vendor.max_entries = htole16(MAX_TPM_LOG_ENTRIES);
-		tclt->vendor.num_entries = htole16(0);
-		tclt->vendor.entry_size = htole32(sizeof(struct tpm_2_log_entry));
+		tclt->vendor.next_offset = 0;
 	}
 
 	return tclt;
 }
 
+static uint16_t get_uint16(uint8_t **data)
+{
+	uint16_t value;
+	memcpy(&value, *data, sizeof(value));
+	*data += sizeof(uint16_t);
+	return le16toh(value);
+}
+
+static uint32_t get_uint32(uint8_t **data)
+{
+	uint32_t value;
+	memcpy(&value, *data, sizeof(value));
+	*data += sizeof(uint32_t);
+	return le32toh(value);
+}
+
+/* Returns non-zero if an event was parsed. */
+static bool parse_log_event(struct tpm_2_log_table *tclt,
+			    struct log_event *ev,
+			    uint16_t *offset)
+{
+	uint8_t *tce;
+	uint32_t i;
+
+	if (*offset == tclt->vendor.next_offset)
+		return false;
+
+	tce = &tclt->events[*offset];
+
+	ev->pcr = get_uint32(&tce);
+	ev->event_type = get_uint32(&tce);
+	ev->digest_count = get_uint32(&tce);
+
+	for (i = 0; i < ev->digest_count; ++i) {
+		ev->digests[i].hash_type = get_uint16(&tce);
+
+		ev->digests[i].hash = tce;
+		tce += vb2_digest_size(tpmalg_to_vb2_hash(ev->digests[i].hash_type));
+	}
+
+	ev->name_len = get_uint32(&tce);
+
+	ev->name = (char *)tce;
+	tce += ev->name_len;
+
+	*offset = tce - tclt->events;
+	return true;
+}
+
 void tpm2_log_dump(void)
 {
-	int i, j;
+	uint16_t offset;
+	struct log_event ev;
 	struct tpm_2_log_table *tclt;
-	int hash_size;
-	const char *alg_name;
 
 	tclt = tpm_log_init();
 	if (!tclt)
 		return;
 
-	hash_size = vb2_digest_size(tpm_log_alg());
-	alg_name = vb2_get_hash_algorithm_name(tpm_log_alg());
+	offset = 0;
+	while (parse_log_event(tclt, &ev, &offset)) {
+		uint32_t i;
 
-	printk(BIOS_INFO, "coreboot TPM 2.0 measurements:\n\n");
-	for (i = 0; i < le16toh(tclt->vendor.num_entries); i++) {
-		struct tpm_2_log_entry *tce = &tclt->entries[i];
+		printk(BIOS_INFO, " PCR-%u [%s]:\n", ev.pcr, ev.name);
 
-		printk(BIOS_INFO, " PCR-%u ", le32toh(tce->pcr));
+		for (i = 0; i < ev.digest_count; ++i) {
+			enum vb2_hash_algorithm hash_type;
+			int digest_size, j;
 
-		for (j = 0; j < hash_size; j++)
-			printk(BIOS_INFO, "%02x", tce->digest[j]);
+			hash_type = tpmalg_to_vb2_hash(ev.digests[i].hash_type);
+			digest_size = vb2_digest_size(hash_type);
 
-		printk(BIOS_INFO, " %s [%s]\n", alg_name, tce->data);
+			printk(BIOS_INFO, "  %6s: ", vb2_get_hash_algorithm_name(hash_type));
+			for (j = 0; j < digest_size; ++j)
+				printk(BIOS_INFO, "%02x", ev.digests[i].hash[j]);
+			printk(BIOS_INFO, "\n");
+		}
 	}
 	printk(BIOS_INFO, "\n");
 }
 
-void tpm2_log_add_table_entry(const char *name, const uint32_t pcr,
-			      enum vb2_hash_algorithm digest_algo,
-			      const uint8_t *digest,
-			      const size_t digest_len)
+void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_digest *digests)
 {
 	struct tpm_2_log_table *tclt;
-	struct tpm_2_log_entry *tce;
+	uint16_t name_len, needed_size;
+	uint8_t *tce;
+	int i, digest_count;
 
 	tclt = tpm_log_init();
 	if (!tclt) {
@@ -134,64 +212,81 @@ void tpm2_log_add_table_entry(const char *name, const uint32_t pcr,
 		return;
 	}
 
-	if (digest_algo != tpm_log_alg()) {
-		printk(BIOS_WARNING, "TPM LOG: digest is of unsupported type: %s\n",
-		       vb2_get_hash_algorithm_name(digest_algo));
+	name_len = strlen(name) + 1;
+	needed_size = 4 * sizeof(uint32_t) + name_len;
+	for (i = 0; digests[i].hash_type != VB2_HASH_INVALID; ++i)
+		needed_size += sizeof(uint16_t) + vb2_digest_size(digests[i].hash_type);
+
+	digest_count = i;
+
+	if (sizeof(*tclt) + tclt->vendor.next_offset + needed_size > MAX_TCPA_LOG_SIZE) {
+		printk(BIOS_WARNING, "TCPA: TCPA log table is full\n");
 		return;
 	}
 
-	if (digest_len != vb2_digest_size(tpm_log_alg())) {
-		printk(BIOS_WARNING, "TPM LOG: digest has invalid length: %d\n",
-		       (int)digest_len);
-		return;
+	tce = &tclt->events[tclt->vendor.next_offset];
+
+	*(uint32_t *)tce = htole32(pcr);
+	tce += sizeof(uint32_t);
+	*(uint32_t *)tce = htole32(EV_ACTION);
+	tce += sizeof(uint32_t);
+	*(uint32_t *)tce = htole32(digest_count);
+	tce += sizeof(uint32_t);
+
+	for (i = 0; digests[i].hash_type != VB2_HASH_INVALID; ++i) {
+		int hash_size = vb2_digest_size(digests[i].hash_type);
+
+		*(uint16_t *)tce = htole16(tpmalg_from_vb2_hash(digests[i].hash_type));
+		tce += sizeof(uint16_t);
+		memcpy(tce, digests[i].hash, hash_size);
+		tce += hash_size;
 	}
 
-	if (le16toh(tclt->vendor.num_entries) >= le16toh(tclt->vendor.max_entries)) {
-		printk(BIOS_WARNING, "TPM LOG: log table is full\n");
-		return;
-	}
+	*(uint32_t *)tce = htole32(name_len);
+	tce += sizeof(uint32_t);
+	memcpy(tce, name, name_len);
 
-	tce = &tclt->entries[le16toh(tclt->vendor.num_entries)];
-	tclt->vendor.num_entries = htole16(le16toh(tclt->vendor.num_entries) + 1);
-
-	tce->pcr = htole32(pcr);
-	tce->event_type = htole32(EV_ACTION);
-
-	tce->digest_count = htole32(1);
-	tce->digest_type = htole16(tpmalg_from_vb2_hash(tpm_log_alg()));
-	memcpy(tce->digest, digest, vb2_digest_size(tpm_log_alg()));
-
-	tce->data_length = htole32(sizeof(tce->data));
-	strncpy((char *)tce->data, name, sizeof(tce->data) - 1);
-	tce->data[sizeof(tce->data) - 1] = '\0';
+	tclt->vendor.next_offset += needed_size;
 }
 
-int tpm2_log_get(int entry_idx, int *pcr, const uint8_t **digest_data,
-		 enum vb2_hash_algorithm *digest_algo, const char **event_name)
+int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char **event_name)
 {
+	uint16_t offset;
+	struct log_event ev;
+	int idx;
 	struct tpm_2_log_table *tclt;
-	struct tpm_2_log_entry *tce;
 
 	tclt = tpm_log_init();
 	if (!tclt)
 		return 1;
 
-	if (entry_idx < 0 || entry_idx >= le16toh(tclt->vendor.num_entries))
-		return 1;
+	offset = 0;
+	idx = 0;
+	while (parse_log_event(tclt, &ev, &offset)) {
+		if (idx != entry_idx) {
+			++idx;
+			continue;
+		}
 
-	tce = &tclt->entries[entry_idx];
+		int i;
+		for (i = 0; i < ev.digest_count; ++i) {
+			digests[i].hash_type = tpmalg_to_vb2_hash(ev.digests[i].hash_type);
+			digests[i].hash = ev.digests[i].hash;
+		}
+		digests[ev.digest_count].hash_type = VB2_HASH_INVALID;
 
-	*pcr = le32toh(tce->pcr);
-	*digest_data = tce->digest;
-	*digest_algo = tpm_log_alg(); /* We validate algorithm on addition */
-	*event_name = (char *)tce->data;
-	return 0;
+		*pcr = ev.pcr;
+		*event_name = ev.name;
+		return 0;
+	}
+
+	return 1;
 }
 
 uint16_t tpm2_log_get_size(const void *log_table)
 {
 	const struct tpm_2_log_table *tclt = log_table;
-	return le16toh(tclt->vendor.num_entries);
+	return sizeof(*tclt) + le16toh(tclt->vendor.next_offset);
 }
 
 void tpm2_preram_log_clear(void)
@@ -202,34 +297,15 @@ void tpm2_preram_log_clear(void)
 	 * is not initialized.
 	 */
 	struct tpm_2_log_table *tclt = (struct tpm_2_log_table *)_tpm_log;
-	tclt->vendor.max_entries = htole16(MAX_TPM_LOG_ENTRIES);
-	tclt->vendor.num_entries = htole16(0);
+	tclt->vendor.next_offset = 0;
 }
 
 void tpm2_log_copy_entries(const void *from, void *to)
 {
 	const struct tpm_2_log_table *from_log = from;
 	struct tpm_2_log_table *to_log = to;
-	int i;
 
-	for (i = 0; i < le16toh(from_log->vendor.num_entries); i++) {
-		if (le16toh(to_log->vendor.num_entries) >= le16toh(to_log->vendor.max_entries)) {
-			printk(BIOS_WARNING, "TPM LOG: log table is full\n");
-			return;
-		}
-
-		struct tpm_2_log_entry *tce =
-			&to_log->entries[le16toh(to_log->vendor.num_entries)];
-		to_log->vendor.num_entries = htole16(le16toh(to_log->vendor.num_entries) + 1);
-
-		tce->pcr = from_log->entries[i].pcr;
-		tce->event_type = from_log->entries[i].event_type;
-
-		tce->digest_count = from_log->entries[i].digest_count;
-		tce->digest_type = from_log->entries[i].digest_type;
-		memcpy(tce->digest, from_log->entries[i].digest, sizeof(tce->digest));
-
-		tce->data_length = from_log->entries[i].data_length;
-		memcpy(tce->data, from_log->entries[i].data, sizeof(tce->data));
-	}
+	// TODO: check  for enough room via vendor.max_offset  
+	memcpy(to_log->events, from_log->events, from_log->vendor.next_offset);
+	to_log->vendor.next_offset = from_log->vendor.next_offset;
 }

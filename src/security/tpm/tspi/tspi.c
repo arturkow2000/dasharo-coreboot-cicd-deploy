@@ -219,12 +219,11 @@ tpm_result_t tpm_clear_and_reenable(void)
 	return TPM_SUCCESS;
 }
 
-tpm_result_t tpm_extend_pcr(int pcr, enum vb2_hash_algorithm digest_algo,
-			const uint8_t *digest, size_t digest_len, const char *name)
+tpm_result_t tpm_extend_pcr(int pcr, const struct tpm_digest *digests, const char *name)
 {
 	tpm_result_t rc;
 
-	if (!digest)
+	if (!digests)
 		return TPM_IOERROR;
 
 	if (tspi_tpm_is_setup()) {
@@ -235,7 +234,7 @@ tpm_result_t tpm_extend_pcr(int pcr, enum vb2_hash_algorithm digest_algo,
 		}
 
 		printk(BIOS_DEBUG, "TPM: Extending digest for `%s` into PCR %d\n", name, pcr);
-		rc = tlcl_extend(pcr, digest, digest_algo);
+		rc = tlcl_extend(pcr, digests);
 		if (rc != TPM_SUCCESS) {
 			printk(BIOS_ERR, "TPM Error (%#x): Extending hash for `%s` into PCR %d failed.\n",
 			       rc, name, pcr);
@@ -244,7 +243,7 @@ tpm_result_t tpm_extend_pcr(int pcr, enum vb2_hash_algorithm digest_algo,
 	}
 
 	if (CONFIG(TPM_MEASURED_BOOT))
-		tpm_log_add_table_entry(name, pcr, digest_algo, digest, digest_len);
+		tpm_log_add_table_entry(name, pcr, digests);
 
 	printk(BIOS_DEBUG, "TPM: Digest of `%s` to PCR %d %s\n",
 	       name, pcr, tspi_tpm_is_setup() ? "measured" : "logged");
@@ -261,10 +260,12 @@ tpm_result_t tpm_measure_region(const struct region_device *rdev, uint8_t pcr,
 	uint32_t offset;
 	size_t len;
 	struct vb2_digest_context ctx;
+	struct tpm_digest digests[2];
 
 	if (!rdev || !rname)
 		return TPM_CB_INVALID_ARG;
 
+	// TODO: compute multiple algorithms here 
 	digest_len = vb2_digest_size(tpm_log_alg());
 	assert(digest_len <= sizeof(digest));
 	if (vb2_digest_init(&ctx, vboot_hwcrypto_allowed(), tpm_log_alg(),
@@ -293,6 +294,10 @@ tpm_result_t tpm_measure_region(const struct region_device *rdev, uint8_t pcr,
 		printk(BIOS_ERR, "TPM: Error finalizing hash.\n");
 		return TPM_CB_HASH_ERROR;
 	}
-	return tpm_extend_pcr(pcr, tpm_log_alg(), digest, digest_len, rname);
+
+	digests[0].hash = digest;
+	digests[0].hash_type = tpm_log_alg();
+	digests[1].hash_type = VB2_HASH_INVALID;
+	return tpm_extend_pcr(pcr, digests, rname);
 }
 #endif /* VBOOT_LIB */

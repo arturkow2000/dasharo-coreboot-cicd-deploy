@@ -9,7 +9,7 @@
 #define TPM_20_LOG_DATA_MAX_LENGTH 50
 
 #define TPM_20_LOG_VI_MAGIC 0x32544243 /* "CBT2" in LE */
-#define TPM_20_LOG_VI_MAJOR 1
+#define TPM_20_LOG_VI_MAJOR 2
 #define TPM_20_LOG_VI_MINOR 0
 
 /*
@@ -38,25 +38,12 @@
 #  define TPM_20_LOG_DIGEST_MAX_LENGTH 1 /* To avoid compilation error */
 #endif
 
-/* TCG_PCR_EVENT2 */
-struct tpm_2_log_entry {
-	uint32_t pcr;
-	uint32_t event_type;
-	uint32_t digest_count; /* Always 1 in current implementation */
-	uint16_t digest_type;
-	uint8_t digest[TPM_20_LOG_DIGEST_MAX_LENGTH];
-	uint32_t data_length;
-	uint8_t data[TPM_20_LOG_DATA_MAX_LENGTH];
-} __packed;
-
 struct tpm_2_vendor {
 	uint8_t reserved;
 	uint8_t version_major;
 	uint8_t version_minor;
 	uint32_t magic;
-	uint16_t max_entries;
-	uint16_t num_entries;
-	uint32_t entry_size;
+	uint16_t next_offset; // Offset within events array of tcpa_table.
 } __packed;
 
 struct tpm_2_log_table {
@@ -64,7 +51,17 @@ struct tpm_2_log_table {
 	struct tpm_digest_sizes digest_sizes[1];
 	uint8_t vendor_info_size;
 	struct tpm_2_vendor vendor;
-	struct tpm_2_log_entry entries[]; /* Variable number of entries */
+	uint8_t events[];
+} __packed;
+
+#define MAX_TCPA_LOG_SIZE 4096
+#define TCPA_PCR_HASH_NAME 50
+
+struct tcpa_table {
+	struct tcg_efi_spec_id_event header; // TCG_PCR_EVENT actually
+	/* Digest sizes followed by vendor info size and vendor info */
+
+	uint8_t events[0];
 } __packed;
 
 #endif
