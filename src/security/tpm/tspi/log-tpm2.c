@@ -151,6 +151,19 @@ bool tpm2_log_alg_active(enum vb2_hash_algorithm alg)
 	return get_pcr_banks_info()->is_active[alg_index];
 }
 
+/* Assumes tclt->header.num_of_algorithms is already set to its final value. */
+static struct tpm_2_log_bottom *get_log_bottom(const struct tpm_2_log_table *tclt)
+{
+	uint8_t *p;
+
+	/* Start at the first variable-sized part of the header. */
+	p = (uint8_t *)tclt->header.digest_sizes;
+	/* Skip over it. */
+	p += tclt->header.num_of_algorithms * sizeof(tclt->header.digest_sizes[0]);
+	/* `p` points at `uint8_t vendor_info_size` here. */
+	return (struct tpm_2_log_bottom *)p;
+}
+
 void *tpm2_log_cbmem_init(void)
 {
 	static struct tpm_2_log_table *tclt;
@@ -162,6 +175,7 @@ void *tpm2_log_cbmem_init(void)
 		size_t tpm_log_len;
 		struct tcg_efi_spec_id_event *hdr;
 		struct pcr_banks_info *pcr_banks_info;
+		struct tpm_2_log_bottom *bottom;
 
 		tclt = cbmem_find(CBMEM_ID_TPM2_TCG_LOG);
 		if (tclt)
@@ -172,11 +186,16 @@ void *tpm2_log_cbmem_init(void)
 		if (!tclt)
 			return NULL;
 
+		pcr_banks_info = get_pcr_banks_info();
+
 		memset(tclt, 0, tpm_log_len);
 		hdr = &tclt->header;
 
 		hdr->event_type = htole32(EV_NO_ACTION);
-		hdr->event_size = htole32(33 + sizeof(tclt->vendor));
+		hdr->event_size = htole32(28 +
+					  pcr_banks_info->active_count * sizeof(hdr->digest_sizes[0]) +
+					  1 +
+					  TPM_20_VENDOR_INFO_SIZE);
 		strcpy((char *)hdr->signature, TPM_20_SPEC_ID_EVENT_SIGNATURE);
 		hdr->platform_class = htole32(0x00); // client platform
 		hdr->spec_version_minor = 0x00;
@@ -184,12 +203,11 @@ void *tpm2_log_cbmem_init(void)
 		hdr->spec_errata = 0x00;
 		hdr->uintn_size = 0x02; // 64-bit UINT
 
-		pcr_banks_info = get_pcr_banks_info();
 		hdr->num_of_algorithms = htole32(pcr_banks_info->active_count);
-		for (i = 0, j = 0; i < le32toh(hdr->num_of_algorithms); ++i) {
+		for (i = 0, j = -1; i < le32toh(hdr->num_of_algorithms); ++i) {
 			/* Find the next active bank. */
-			while (!pcr_banks_info->is_active[j])
-				++j;
+			while (!pcr_banks_info->is_active[++j])
+				continue;
 
 			hdr->digest_sizes[i].alg_id =
 				htole16(tpmalg_from_vb2_hash(enabled_tpm_algs[j]));
@@ -197,12 +215,13 @@ void *tpm2_log_cbmem_init(void)
 				htole16(vb2_digest_size(enabled_tpm_algs[j]));
 		}
 
-		tclt->vendor_info_size = sizeof(tclt->vendor);
-		tclt->vendor.reserved = 0;
-		tclt->vendor.version_major = TPM_20_LOG_VI_MAJOR;
-		tclt->vendor.version_minor = TPM_20_LOG_VI_MINOR;
-		tclt->vendor.magic = htole32(TPM_20_LOG_VI_MAGIC);
-		tclt->vendor.next_offset = 0;
+		bottom = get_log_bottom(tclt);
+		bottom->vendor_info_size = TPM_20_VENDOR_INFO_SIZE;
+		bottom->reserved = 0;
+		bottom->version_major = TPM_20_LOG_VI_MAJOR;
+		bottom->version_minor = TPM_20_LOG_VI_MINOR;
+		bottom->magic = htole32(TPM_20_LOG_VI_MAGIC);
+		bottom->next_offset = 0;
 	}
 
 	return tclt;
@@ -232,10 +251,11 @@ static bool parse_log_event(struct tpm_2_log_table *tclt,
 	uint8_t *tce;
 	uint32_t i;
 
-	if (*offset == tclt->vendor.next_offset)
+	struct tpm_2_log_bottom *bottom = get_log_bottom(tclt);
+	if (*offset == bottom->next_offset)
 		return false;
 
-	tce = &tclt->events[*offset];
+	tce = &bottom->events[*offset];
 
 	ev->pcr = get_uint32(&tce);
 	ev->event_type = get_uint32(&tce);
@@ -253,7 +273,7 @@ static bool parse_log_event(struct tpm_2_log_table *tclt,
 	ev->name = (char *)tce;
 	tce += ev->name_len;
 
-	*offset = tce - tclt->events;
+	*offset = tce - &bottom->events[0];
 	return true;
 }
 
@@ -292,6 +312,7 @@ void tpm2_log_dump(void)
 void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_digest *digests)
 {
 	struct tpm_2_log_table *tclt;
+	struct tpm_2_log_bottom *bottom;
 	uint16_t name_len, needed_size;
 	uint8_t *tce;
 	int i, digest_count;
@@ -314,12 +335,13 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 
 	digest_count = i;
 
-	if (sizeof(*tclt) + tclt->vendor.next_offset + needed_size > MAX_TCPA_LOG_SIZE) {
+	bottom = get_log_bottom(tclt);
+	if (sizeof(*tclt) + bottom->next_offset + needed_size > MAX_TCPA_LOG_SIZE) {
 		printk(BIOS_WARNING, "TCPA: TCPA log table is full\n");
 		return;
 	}
 
-	tce = &tclt->events[tclt->vendor.next_offset];
+	tce = &bottom->events[bottom->next_offset];
 
 	*(uint32_t *)tce = htole32(pcr);
 	tce += sizeof(uint32_t);
@@ -341,7 +363,7 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 	tce += sizeof(uint32_t);
 	memcpy(tce, name, name_len);
 
-	tclt->vendor.next_offset += needed_size;
+	bottom->next_offset += needed_size;
 }
 
 int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char **event_name)
@@ -381,7 +403,9 @@ int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char
 uint16_t tpm2_log_get_size(const void *log_table)
 {
 	const struct tpm_2_log_table *tclt = log_table;
-	return sizeof(*tclt) + le16toh(tclt->vendor.next_offset);
+	return sizeof(*tclt) +
+		tclt->header.num_of_algorithms * sizeof(tclt->header.digest_sizes[0]) +
+		le16toh(get_log_bottom(tclt)->next_offset);
 }
 
 void tpm2_preram_log_clear(void)
@@ -392,15 +416,15 @@ void tpm2_preram_log_clear(void)
 	 * is not initialized.
 	 */
 	struct tpm_2_log_table *tclt = (struct tpm_2_log_table *)_tpm_log;
-	tclt->vendor.next_offset = 0;
+	get_log_bottom(tclt)->next_offset = 0;
 }
 
 void tpm2_log_copy_entries(const void *from, void *to)
 {
-	const struct tpm_2_log_table *from_log = from;
-	struct tpm_2_log_table *to_log = to;
+	const struct tpm_2_log_bottom *from_bottom = get_log_bottom(from);
+	struct tpm_2_log_bottom *to_bottom = get_log_bottom(to);
 
-	// TODO: check  for enough room via vendor.max_offset  
-	memcpy(to_log->events, from_log->events, from_log->vendor.next_offset);
-	to_log->vendor.next_offset = from_log->vendor.next_offset;
+	// TODO: check  for enough room via bottom.max_offset  
+	memcpy(to_bottom->events, from_bottom->events, from_bottom->next_offset);
+	to_bottom->next_offset = from_bottom->next_offset;
 }

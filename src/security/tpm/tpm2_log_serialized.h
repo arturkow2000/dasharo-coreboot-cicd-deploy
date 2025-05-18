@@ -35,24 +35,34 @@
 #  define TPM_20_LOG_DIGEST_MAX_LENGTH 1 /* To avoid compilation error */
 #endif
 
-struct tpm_2_vendor {
+#define TPM_20_VENDOR_INFO_SIZE (sizeof(struct tpm_2_log_bottom) - sizeof(uint8_t))
+
+/* This log table has two variable-sized portions one of which is in the middle.  For this
+ * reason the declaration is split in two each ending on a variable-sized portion. */
+struct tpm_2_log_table {
+	struct tcg_efi_spec_id_event header; /* TCG_PCR_EVENT actually */
+	// struct tpm_digest_sizes digest_sizes[header.num_of_algorithms];
+	// struct tpm_2_log_bottom bottom;
+} __packed;
+
+/* The bottom part of the log which follows its first variable-sized portion (list of digest
+   sizes). */
+struct tpm_2_log_bottom {
+	/* Size of the following set of fields. */
+	uint8_t vendor_info_size;
+
+	/* This is vendor info/data. */
 	uint8_t reserved;
 	uint8_t version_major;
 	uint8_t version_minor;
 	uint32_t magic;
-	uint16_t next_offset; // Offset within events array of tcpa_table.
-} __packed;
+	uint16_t next_offset; /* Offset within `events` array */
 
-struct tpm_2_log_table {
-	struct tcg_efi_spec_id_event header; /* TCG_PCR_EVENT actually */
-	struct tpm_digest_sizes digest_sizes[1];
-	uint8_t vendor_info_size;
-	struct tpm_2_vendor vendor;
+	/* Events follow. */
 	uint8_t events[];
 } __packed;
 
 #define MAX_TCPA_LOG_SIZE 4096
-#define TCPA_PCR_HASH_NAME 50
 
 struct tcpa_table {
 	struct tcg_efi_spec_id_event header; // TCG_PCR_EVENT actually
