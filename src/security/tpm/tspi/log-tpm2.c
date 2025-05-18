@@ -34,6 +34,11 @@ struct log_event {
 	char *name;
 };
 
+struct pcr_banks_info {
+	int active_count;
+	bool is_active[ENABLED_TPM_ALGS_NUM];
+};
+
 static enum vb2_hash_algorithm tpmalg_to_vb2_hash(uint16_t hash_type)
 {
 	switch (hash_type) {
@@ -68,6 +73,84 @@ static uint16_t tpmalg_from_vb2_hash(enum vb2_hash_algorithm hash_type)
 	}
 }
 
+static int find_alg_index(enum vb2_hash_algorithm alg)
+{
+	unsigned int i;
+	for (i = 0; i < ENABLED_TPM_ALGS_NUM; i++) {
+		if (enabled_tpm_algs[i] == alg)
+			return i;
+	}
+
+	return -1;
+}
+
+static bool is_all_zeroes(const void *buffer, size_t size)
+{
+	const uint8_t *p = buffer;
+	while (size-- != 0) {
+		if (*p++ != 0)
+			return false;
+	}
+	return true;
+}
+
+static struct pcr_banks_info *get_pcr_banks_info(void)
+{
+	static bool initialized;
+	static struct pcr_banks_info info;
+
+	unsigned int i;
+
+	if (initialized)
+		return &info;
+
+	TPML_PCR_SELECTION pcrs;
+	tpm_result_t rc = tlcl2_get_capability_pcrs(&pcrs);
+	if (rc != TPM_SUCCESS) {
+		for (i = 0; i < ENABLED_TPM_ALGS_NUM; ++i)
+			info.is_active[i] = true;
+		info.active_count = ENABLED_TPM_ALGS_NUM;
+	} else {
+		for (i = 0; i < pcrs.count; i++) {
+			TPMS_PCR_SELECTION *selection = &pcrs.pcrSelections[i];
+
+			enum vb2_hash_algorithm alg = tpmalg_to_vb2_hash(selection->hash);
+			if (alg == VB2_HASH_INVALID) {
+				printk(BIOS_DEBUG, "%s(): unsupported PCR bank: %#x\n",
+				       __func__, selection->hash);
+				continue;
+			}
+
+			int alg_index = find_alg_index(alg);
+			if (alg_index < 0) {
+				printk(BIOS_DEBUG,
+				       "%s(): skipping PCR bank disabled at build-time: %s\n",
+				       __func__, vb2_get_hash_algorithm_name(alg));
+				continue;
+			}
+
+			bool active = !is_all_zeroes(selection->pcrSelect,
+						     selection->sizeofSelect);
+			if (active) {
+				info.is_active[alg_index] = active;
+				++info.active_count;
+			}
+		}
+	}
+
+	initialized = true;
+	return &info;
+}
+
+bool tpm2_log_alg_active(enum vb2_hash_algorithm alg)
+{
+	int alg_index = find_alg_index(alg);
+	if (alg_index < 0)
+		return false;
+
+	return get_pcr_banks_info()->is_active[alg_index];
+}
+
 void *tpm2_log_cbmem_init(void)
 {
 	static struct tpm_2_log_table *tclt;
@@ -75,8 +158,10 @@ void *tpm2_log_cbmem_init(void)
 		return tclt;
 
 	if (ENV_HAS_CBMEM) {
+		int i, j;
 		size_t tpm_log_len;
 		struct tcg_efi_spec_id_event *hdr;
+		struct pcr_banks_info *pcr_banks_info;
 
 		tclt = cbmem_find(CBMEM_ID_TPM2_TCG_LOG);
 		if (tclt)
@@ -98,9 +183,19 @@ void *tpm2_log_cbmem_init(void)
 		hdr->spec_version_major = 0x02;
 		hdr->spec_errata = 0x00;
 		hdr->uintn_size = 0x02; // 64-bit UINT
-		hdr->num_of_algorithms = htole32(1);
-		hdr->digest_sizes[0].alg_id = htole16(tpmalg_from_vb2_hash(tpm_log_alg()));
-		hdr->digest_sizes[0].digest_size = htole16(vb2_digest_size(tpm_log_alg()));
+
+		pcr_banks_info = get_pcr_banks_info();
+		hdr->num_of_algorithms = htole32(pcr_banks_info->active_count);
+		for (i = 0, j = 0; i < le32toh(hdr->num_of_algorithms); ++i) {
+			/* Find the next active bank. */
+			while (!pcr_banks_info->is_active[j])
+				++j;
+
+			hdr->digest_sizes[i].alg_id =
+				htole16(tpmalg_from_vb2_hash(enabled_tpm_algs[j]));
+			hdr->digest_sizes[i].digest_size =
+				htole16(vb2_digest_size(enabled_tpm_algs[j]));
+		}
 
 		tclt->vendor_info_size = sizeof(tclt->vendor);
 		tclt->vendor.reserved = 0;

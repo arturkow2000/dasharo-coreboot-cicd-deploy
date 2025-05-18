@@ -46,26 +46,18 @@ static inline bool tpm_log_use_tpm2_format(void)
 /**
  * Retrieves hash algorithm used by TPM event log or VB2_HASH_INVALID.
  */
-static inline enum vb2_hash_algorithm tpm_log_alg(void)
+static inline bool tpm_log_alg_active(enum vb2_hash_algorithm alg)
 {
 	if (CONFIG(TPM_LOG_CB))
-		return (tlcl_get_family() == TPM_1 ? VB2_HASH_SHA1 : VB2_HASH_SHA256);
+		return alg == (tlcl_get_family() == TPM_1 ? VB2_HASH_SHA1 : VB2_HASH_SHA256);
 
 	if (tpm_log_use_tpm1_format())
-		return VB2_HASH_SHA1;
+		return alg == VB2_HASH_SHA1;
 
-	if (tpm_log_use_tpm2_format()) {
-		if (CONFIG(TPM_HASH_SHA1))
-			return VB2_HASH_SHA1;
-		if (CONFIG(TPM_HASH_SHA256))
-			return VB2_HASH_SHA256;
-		if (CONFIG(TPM_HASH_SHA384))
-			return VB2_HASH_SHA384;
-		if (CONFIG(TPM_HASH_SHA512))
-			return VB2_HASH_SHA512;
-	}
+	if (tpm_log_use_tpm2_format())
+		return tpm2_log_alg_active(alg);
 
-	return VB2_HASH_INVALID;
+	return false;
 }
 
 /**
@@ -215,25 +207,17 @@ tpm_result_t tpm_measure_region(const struct region_device *rdev, uint8_t pcr,
 #define ENABLED_TPM_ALGS_NUM ARRAY_SIZE(enabled_tpm_algs)
 
 static enum vb2_hash_algorithm enabled_tpm_algs[] __maybe_unused = {
-#if CONFIG(TPM_LOG_CB) && CONFIG(TPM1)
-	VB2_HASH_SHA1
-#elif CONFIG(TPM_LOG_CB) && CONFIG(TPM2)
-	VB2_HASH_SHA256
-#elif CONFIG(TPM_LOG_TPM12)
-	VB2_HASH_SHA1
-#elif CONFIG(TPM_LOG_TPM2)
-#  if CONFIG(TPM_HASH_SHA1)
+#if CONFIG(TPM_HASH_SHA1)
 	VB2_HASH_SHA1,
-#  endif
-#  if CONFIG(TPM_HASH_SHA256)
+#endif
+#if CONFIG(TPM_HASH_SHA256)
 	VB2_HASH_SHA256,
-#  endif
-#  if CONFIG(TPM_HASH_SHA384)
-	VB2_HASH_SHA512,
-#  endif
-#  if CONFIG(TPM_HASH_SHA512)
+#endif
+#if CONFIG(TPM_HASH_SHA384)
 	VB2_HASH_SHA384,
-#  endif
+#endif
+#if CONFIG(TPM_HASH_SHA512)
+	VB2_HASH_SHA512,
 #endif
 };
 

@@ -17,7 +17,8 @@ tpm_result_t tspi_measure_cache_to_pcr(void);
 /**
  * Extend a measurement hash taken for a CBFS file into the appropriate PCR.
  */
-tpm_result_t tspi_cbfs_measurement(const char *name, uint32_t type, struct tpm_digest *digests);
+tpm_result_t tspi_cbfs_measurement(const char *name, const void *buffer, size_t size,
+				   uint32_t type, struct vb2_hash hash_hint);
 
 /*
  * Provide a function on SoC level to measure the bootblock for cases where bootblock is

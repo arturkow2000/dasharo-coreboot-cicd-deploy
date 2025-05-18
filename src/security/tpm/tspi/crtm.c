@@ -6,6 +6,7 @@
 #include <cbfs.h>
 #include <symbols.h>
 #include "crtm.h"
+#include <security/vboot/misc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -112,7 +113,39 @@ static bool is_runtime_data(const char *name)
 	return !strcmp(allowlist, name);
 }
 
-tpm_result_t tspi_cbfs_measurement(const char *name, uint32_t type, struct tpm_digest *digests)
+static bool fill_digests(const void *buffer, size_t size, struct vb2_hash hash_hint,
+			 struct vb2_hash hash_storage[ENABLED_TPM_ALGS_NUM],
+			 struct tpm_digest digests[ENABLED_TPM_ALGS_NUM + 1])
+{
+	int i, j;
+	for (i = 0, j = 0; i < ENABLED_TPM_ALGS_NUM; ++i) {
+		enum vb2_hash_algorithm alg = enabled_tpm_algs[i];
+		if (!tpm_log_alg_active(alg))
+			continue;
+
+		digests[j].hash_type = alg;
+
+		if (hash_hint.algo == alg) {
+			digests[j++].hash = hash_hint.raw;
+			continue;
+		}
+
+		if (vb2_hash_calculate(vboot_hwcrypto_allowed(), buffer, size,
+				       alg, &hash_storage[i])) {
+			printk(BIOS_ERR, "%s: failed to compute %s hash.\n", __func__,
+			       vb2_get_hash_algorithm_name(alg));
+			return false;
+		}
+
+		digests[j++].hash = hash_storage[i].raw;
+	}
+
+	digests[j].hash_type = VB2_HASH_INVALID;
+	return true;
+}
+
+tpm_result_t tspi_cbfs_measurement(const char *name, const void *buffer, size_t size,
+				   uint32_t type, struct vb2_hash hash_hint)
 {
 	uint32_t pcr_index;
 	tpm_result_t rc = TPM_SUCCESS;
@@ -148,6 +181,13 @@ tpm_result_t tspi_cbfs_measurement(const char *name, uint32_t type, struct tpm_d
 		else
 			pcr_index = CONFIG_PCR_SRTM;
 		break;
+	}
+
+	struct vb2_hash hash_storage[ENABLED_TPM_ALGS_NUM];
+	struct tpm_digest digests[ENABLED_TPM_ALGS_NUM + 1];
+	if (!fill_digests(buffer, size, hash_hint, hash_storage, digests)) {
+		printk(BIOS_ERR, "%s: failed to fill digests!\n", __func__);
+		return TPM_FAIL;
 	}
 
 	snprintf(tpm_log_metadata, TPM_CB_LOG_PCR_HASH_NAME, "CBFS: %s", name);
