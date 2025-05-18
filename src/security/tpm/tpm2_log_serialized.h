@@ -57,18 +57,10 @@ struct tpm_2_log_bottom {
 	uint8_t version_minor;
 	uint32_t magic;
 	uint16_t next_offset; /* Offset within `events` array */
+	uint16_t max_offset;  /* Maximum within `events` array */
 
 	/* Events follow. */
 	uint8_t events[];
-} __packed;
-
-#define MAX_TCPA_LOG_SIZE 4096
-
-struct tcpa_table {
-	struct tcg_efi_spec_id_event header; // TCG_PCR_EVENT actually
-	/* Digest sizes followed by vendor info size and vendor info */
-
-	uint8_t events[0];
 } __packed;
 
 #endif

@@ -222,6 +222,7 @@ void *tpm2_log_cbmem_init(void)
 		bottom->version_minor = TPM_20_LOG_VI_MINOR;
 		bottom->magic = htole32(TPM_20_LOG_VI_MAGIC);
 		bottom->next_offset = 0;
+		bottom->max_offset = htole16(tpm_log_len - tpm2_log_get_size(tclt));
 	}
 
 	return tclt;
@@ -336,12 +337,12 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 	digest_count = i;
 
 	bottom = get_log_bottom(tclt);
-	if (sizeof(*tclt) + bottom->next_offset + needed_size > MAX_TCPA_LOG_SIZE) {
+	if (le16toh(bottom->next_offset) + needed_size > le16toh(bottom->max_offset)) {
 		printk(BIOS_WARNING, "TCPA: TCPA log table is full\n");
 		return;
 	}
 
-	tce = &bottom->events[bottom->next_offset];
+	tce = &bottom->events[le16toh(bottom->next_offset)];
 
 	*(uint32_t *)tce = htole32(pcr);
 	tce += sizeof(uint32_t);
@@ -363,7 +364,7 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 	tce += sizeof(uint32_t);
 	memcpy(tce, name, name_len);
 
-	bottom->next_offset += needed_size;
+	bottom->next_offset = htole16(le16toh(bottom->next_offset) + needed_size);
 }
 
 int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char **event_name)
@@ -424,7 +425,12 @@ void tpm2_log_copy_entries(const void *from, void *to)
 	const struct tpm_2_log_bottom *from_bottom = get_log_bottom(from);
 	struct tpm_2_log_bottom *to_bottom = get_log_bottom(to);
 
-	// TODO: check  for enough room via bottom.max_offset  
-	memcpy(to_bottom->events, from_bottom->events, from_bottom->next_offset);
+	if (le16toh(to_bottom->max_offset) < le16toh(from_bottom->next_offset)) {
+		printk(BIOS_WARNING,
+		       "TPM LOG: not enough space at destination to copy event log entries!\n");
+		return;
+	}
+
+	memcpy(to_bottom->events, from_bottom->events, le16toh(from_bottom->next_offset));
 	to_bottom->next_offset = from_bottom->next_offset;
 }

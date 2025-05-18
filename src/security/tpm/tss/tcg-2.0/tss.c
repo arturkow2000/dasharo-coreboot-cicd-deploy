@@ -518,6 +518,6 @@ tpm_result_t tlcl2_get_capability_pcrs(TPML_PCR_SELECTION *Pcrs)
 			TpmCap.data.assignedPCR.pcrSelections[index].pcrSelect,
 			Pcrs->pcrSelections[index].sizeofSelect);
 	}
-	
+
 	return TPM_SUCCESS;
 }
