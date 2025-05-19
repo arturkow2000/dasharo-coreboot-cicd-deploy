@@ -56,6 +56,7 @@ struct tpm_2_log_bottom {
 	uint8_t version_major;
 	uint8_t version_minor;
 	uint32_t magic;
+	uint16_t num_entries;
 	uint16_t next_offset; /* Offset within `events` array */
 	uint16_t max_offset;  /* Maximum within `events` array */
 

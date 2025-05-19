@@ -494,7 +494,7 @@ tpm_result_t tlcl2_get_capability(TPM_CAP capability, uint32_t property,
 	return TPM_SUCCESS;
 }
 
-tpm_result_t tlcl2_get_capability_pcrs(TPML_PCR_SELECTION *Pcrs)
+tpm_result_t tlcl2_get_capability_pcrs(TPML_PCR_SELECTION *pcrs)
 {
 	TPMS_CAPABILITY_DATA TpmCap;
 	tpm_result_t rc;
@@ -504,19 +504,19 @@ tpm_result_t tlcl2_get_capability_pcrs(TPML_PCR_SELECTION *Pcrs)
 	if (rc != TPM_SUCCESS)
 		return rc;
 
-	Pcrs->count = TpmCap.data.assignedPCR.count;
-	printk(BIOS_SPEW, "%s(): Pcrs->count = %d\n", __func__, Pcrs->count);
+	pcrs->count = TpmCap.data.assignedPCR.count;
+	printk(BIOS_DEBUG, "%s(): pcrs->count = %d\n", __func__, pcrs->count);
 
-	for (index = 0; index < Pcrs->count; index++) {
-		Pcrs->pcrSelections[index].hash =
+	for (index = 0; index < pcrs->count; index++) {
+		pcrs->pcrSelections[index].hash =
 			swab16(TpmCap.data.assignedPCR.pcrSelections[index].hash);
-		printk(BIOS_SPEW, "%s(): Pcrs->pcrSelections[%d].hash = %#x\n",
-		       __func__, index, Pcrs->pcrSelections[index].hash);
-		Pcrs->pcrSelections[index].sizeofSelect =
+		printk(BIOS_DEBUG, "%s(): pcrs->pcrSelections[%d].hash = %#x\n",
+		       __func__, index, pcrs->pcrSelections[index].hash);
+		pcrs->pcrSelections[index].sizeofSelect =
 			TpmCap.data.assignedPCR.pcrSelections[index].sizeofSelect;
-		memcpy(Pcrs->pcrSelections[index].pcrSelect,
+		memcpy(pcrs->pcrSelections[index].pcrSelect,
 			TpmCap.data.assignedPCR.pcrSelections[index].pcrSelect,
-			Pcrs->pcrSelections[index].sizeofSelect);
+			pcrs->pcrSelections[index].sizeofSelect);
 	}
 
 	return TPM_SUCCESS;

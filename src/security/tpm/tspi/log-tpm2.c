@@ -100,44 +100,59 @@ static struct pcr_banks_info *get_pcr_banks_info(void)
 	static struct pcr_banks_info info;
 
 	unsigned int i;
+	tpm_result_t rc;
 
 	if (initialized)
 		return &info;
 
-	TPML_PCR_SELECTION pcrs;
-	tpm_result_t rc = tlcl2_get_capability_pcrs(&pcrs);
+	/* Start by pretending that all hashes are supported in case there will be a failure. */
+	for (i = 0; i < ENABLED_TPM_ALGS_NUM; ++i)
+		info.is_active[i] = true;
+	info.active_count = ENABLED_TPM_ALGS_NUM;
+
+	// rc = tpm_setup(/*s3resume=*/false);
+	rc = tlcl_lib_init();
 	if (rc != TPM_SUCCESS) {
-		for (i = 0; i < ENABLED_TPM_ALGS_NUM; ++i)
-			info.is_active[i] = true;
-		info.active_count = ENABLED_TPM_ALGS_NUM;
-	} else {
-		for (i = 0; i < pcrs.count; i++) {
-			TPMS_PCR_SELECTION *selection = &pcrs.pcrSelections[i];
-
-			enum vb2_hash_algorithm alg = tpmalg_to_vb2_hash(selection->hash);
-			if (alg == VB2_HASH_INVALID) {
-				printk(BIOS_DEBUG, "%s(): unsupported PCR bank: %#x\n",
-				       __func__, selection->hash);
-				continue;
-			}
-
-			int alg_index = find_alg_index(alg);
-			if (alg_index < 0) {
-				printk(BIOS_DEBUG,
-				       "%s(): skipping PCR bank disabled at build-time: %s\n",
-				       __func__, vb2_get_hash_algorithm_name(alg));
-				continue;
-			}
-
-			bool active = !is_all_zeroes(selection->pcrSelect,
-						     selection->sizeofSelect);
-			if (active) {
-				info.is_active[alg_index] = active;
-				++info.active_count;
-			}
-		}
+		printk(BIOS_DEBUG, "%s(): failed to initialize TPM\n", __func__);
+		return &info;
 	}
 
+	TPML_PCR_SELECTION pcrs;
+	rc = tlcl2_get_capability_pcrs(&pcrs);
+	if (rc != TPM_SUCCESS) {
+		printk(BIOS_DEBUG, "%s(): failed to query PCR capabilities\n", __func__);
+		return &info;
+	}
+
+	memset(info.is_active, 0, sizeof(info.is_active));
+
+	for (i = 0; i < pcrs.count; i++) {
+		TPMS_PCR_SELECTION *selection = &pcrs.pcrSelections[i];
+
+		enum vb2_hash_algorithm alg = tpmalg_to_vb2_hash(selection->hash);
+		if (alg == VB2_HASH_INVALID) {
+			printk(BIOS_DEBUG, "%s(): unsupported PCR bank: %#x\n",
+			       __func__, selection->hash);
+			continue;
+		}
+
+		int alg_index = find_alg_index(alg);
+		if (alg_index < 0) {
+			printk(BIOS_DEBUG,
+			       "%s(): skipping PCR bank disabled at build-time: %s\n",
+			       __func__, vb2_get_hash_algorithm_name(alg));
+			continue;
+		}
+
+		bool active = !is_all_zeroes(selection->pcrSelect,
+					     selection->sizeofSelect);
+		if (active) {
+			info.is_active[alg_index] = active;
+			++info.active_count;
+		}
+	}
+	
+	/* Only considering reaching this point as successful initialization. */
 	initialized = true;
 	return &info;
 }
@@ -159,10 +174,19 @@ static struct tpm_2_log_bottom *get_log_bottom(const struct tpm_2_log_table *tcl
 	/* Start at the first variable-sized part of the header. */
 	p = (uint8_t *)tclt->header.digest_sizes;
 	/* Skip over it. */
-	p += tclt->header.num_of_algorithms * sizeof(tclt->header.digest_sizes[0]);
+	p += le32toh(tclt->header.num_of_algorithms) * sizeof(tclt->header.digest_sizes[0]);
 	/* `p` points at `uint8_t vendor_info_size` here. */
 	return (struct tpm_2_log_bottom *)p;
 }
+
+static uint16_t get_log_footprint(const struct tpm_2_log_table *tclt)
+{
+	return sizeof(*tclt) +
+		le32toh(tclt->header.num_of_algorithms) * sizeof(tclt->header.digest_sizes[0]) +
+		sizeof(struct tpm_2_log_bottom) +
+		le16toh(get_log_bottom(tclt)->next_offset);
+}
+
 
 void *tpm2_log_cbmem_init(void)
 {
@@ -221,8 +245,9 @@ void *tpm2_log_cbmem_init(void)
 		bottom->version_major = TPM_20_LOG_VI_MAJOR;
 		bottom->version_minor = TPM_20_LOG_VI_MINOR;
 		bottom->magic = htole32(TPM_20_LOG_VI_MAGIC);
+		bottom->num_entries = 0;
 		bottom->next_offset = 0;
-		bottom->max_offset = htole16(tpm_log_len - tpm2_log_get_size(tclt));
+		bottom->max_offset = htole16(tpm_log_len - get_log_footprint(tclt));
 	}
 
 	return tclt;
@@ -338,7 +363,7 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 
 	bottom = get_log_bottom(tclt);
 	if (le16toh(bottom->next_offset) + needed_size > le16toh(bottom->max_offset)) {
-		printk(BIOS_WARNING, "TCPA: TCPA log table is full\n");
+		printk(BIOS_WARNING, "TPM LOG: log is full\n");
 		return;
 	}
 
@@ -365,6 +390,7 @@ void tpm2_log_add_table_entry(const char *name, uint32_t pcr, const struct tpm_d
 	memcpy(tce, name, name_len);
 
 	bottom->next_offset = htole16(le16toh(bottom->next_offset) + needed_size);
+	bottom->num_entries = htole16(le16toh(bottom->num_entries) + 1);
 }
 
 int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char **event_name)
@@ -404,9 +430,7 @@ int tpm2_log_get(int entry_idx, int *pcr, struct tpm_digest *digests, const char
 uint16_t tpm2_log_get_size(const void *log_table)
 {
 	const struct tpm_2_log_table *tclt = log_table;
-	return sizeof(*tclt) +
-		tclt->header.num_of_algorithms * sizeof(tclt->header.digest_sizes[0]) +
-		le16toh(get_log_bottom(tclt)->next_offset);
+	return le16toh(get_log_bottom(tclt)->num_entries);
 }
 
 void tpm2_preram_log_clear(void)
@@ -414,10 +438,15 @@ void tpm2_preram_log_clear(void)
 	printk(BIOS_INFO, "TPM LOG: clearing the log\n");
 	/*
 	 * Pre-RAM log is only for internal use and isn't exported anywhere, hence it's header
-	 * is not initialized.
+	 * is not fully initialized.
 	 */
 	struct tpm_2_log_table *tclt = (struct tpm_2_log_table *)_tpm_log;
-	get_log_bottom(tclt)->next_offset = 0;
+	struct tpm_2_log_bottom *bottom = get_log_bottom(tclt);
+
+	tclt->header.num_of_algorithms = htole32(get_pcr_banks_info()->active_count);
+	bottom->num_entries = 0;
+	bottom->next_offset = 0;
+	bottom->max_offset = htole16(_etpm_log - _tpm_log - get_log_footprint(tclt));
 }
 
 void tpm2_log_copy_entries(const void *from, void *to)
@@ -432,5 +461,6 @@ void tpm2_log_copy_entries(const void *from, void *to)
 	}
 
 	memcpy(to_bottom->events, from_bottom->events, le16toh(from_bottom->next_offset));
+	to_bottom->num_entries = from_bottom->num_entries;
 	to_bottom->next_offset = from_bottom->next_offset;
 }
