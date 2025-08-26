@@ -66,9 +66,17 @@
 #define IOE_P2SB_BAR		IOE_PCR_ABOVE_4G_BASE_ADDR
 #define IOE_P2SB_SIZE		(256 * MiB)
 
+#if CONFIG_BOARD_NOVACUSTOM_NUC_BOX
 #define IOM_BASE_ADDR		0x3fff0aa0000
+#else
+#define IOM_BASE_ADDR		0x60aa0000
+#endif
 #define IOM_BASE_SIZE		0x1600
+#if CONFIG_BOARD_NOVACUSTOM_NUC_BOX
 #define IOM_BASE_ADDR_MAX	0x3fff0aa15ff
+#else
+#define IOM_BASE_ADDR_MAX	0x60aa15ff
+#endif
 
 /*
  * I/O port address space
