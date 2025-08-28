@@ -1,0 +1,66 @@
+name: Testy
+on:
+  pull_request:
+    branches:
+      - dasharo
+      - dasharo-24.12
+  push:
+    branches:
+      - dasharo-24.12
+    tags:
+      - "*"
+jobs:
+  build_msi:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        vendor: [msi]
+        # model: [ms7d25_ddr4, ms7d25_ddr5, ms7e06_ddr4, ms7e06_ddr5]
+        model: [ms7d25_ddr4]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Checkout pull request HEAD commit instead of merge commit
+          # See: https://github.com/actions/checkout#checkout-pull-request-head-commit-instead-of-merge-commit
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Fetch complete history
+          fetch-depth: 0
+      - name: Checkout all submodules
+        run: git submodule update --init --recursive --checkout
+      - name: Build Dasharo
+        run: |
+          ./build.sh ${{ matrix.model }}
+          pkcs7sign=payloads/external/edk2/workspace/Dasharo/BaseTools/Source/Python/Pkcs7Sign
+          ./capsule.sh make -t "$pkcs7sign"/TestRoot.pub.pem \
+                            -o "$pkcs7sign"/TestSub.pub.pem \
+                            -s "$pkcs7sign"/TestCert.pem
+          ./capsule.sh cab -k "$pkcs7sign"/TestCert.pem -c "$pkcs7sign"/TestCert.pem
+          mv *.cap build/coreboot.cap
+          mv *.cab build/coreboot.cab
+      - name: Save artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: "dasharo-${{ matrix.vendor }}-${{ matrix.model }}"
+          path: |
+            build/coreboot.rom
+            build/coreboot.cap
+            build/coreboot.cab
+          retention-days: 30
+  deploy_msi_ms7d25:
+    # if: startsWith(github.ref, 'refs/tags/msi_ms7d25')
+    needs: build_msi
+    uses: ./.github/workflows/deploy-template.yml
+    with:
+      platform: msi
+      vendor: ${{ matrix.vendor }}
+      model: "ms7d25"
+      type: ${{ matrix.type }}
+      artifact_name: "dasharo-${{ matrix.vendor }}-ms7d25_${{ matrix.type }}"
+      released_by_3mdeb: true
+    secrets: inherit
+    strategy:
+      matrix:
+        vendor: [msi]
+        # type: [ddr4, ddr5]
+        type: [ddr4]

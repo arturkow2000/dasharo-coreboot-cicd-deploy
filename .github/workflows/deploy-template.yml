@@ -62,6 +62,7 @@ jobs:
           path: "./artifacts"
 
       - name: Upload to Nextcloud
+        if: false
         run: |
           BASE_URL="https://cloud.3mdeb.com/public.php/webdav"
           url_part=$(echo "${{ secrets.CLOUD_URL }}" | cut -d'/' -f6)
@@ -94,7 +95,7 @@ jobs:
               new_name=$(echo "${new_name%.rom}_${{ inputs.type }}.rom")
             fi
           fi
-          
+
           # Prepare cloud path
 
           if [[ "$model" == *adln* ]]; then
