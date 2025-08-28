@@ -130,7 +130,9 @@ jobs:
           ./capsule.sh make -t "$pkcs7sign"/TestRoot.pub.pem \
                             -o "$pkcs7sign"/TestSub.pub.pem \
                             -s "$pkcs7sign"/TestCert.pem
+          ./capsule.sh cab -k "$pkcs7sign"/TestCert.pem -c "$pkcs7sign"/TestCert.pem
           mv *.cap build/coreboot.cap
+          mv *.cab build/coreboot.cab
       - name: Save artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -138,6 +140,7 @@ jobs:
           path: |
             build/coreboot.rom
             build/coreboot.cap
+            build/coreboot.cab
           retention-days: 30
   build_protectli:
     runs-on: ubuntu-24.04
